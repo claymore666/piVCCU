@@ -251,7 +251,12 @@ static int hb_rf_eth_try_connect(char endpointIdentifier)
 
   hb_rf_eth_set_timeout(sock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,19,0)
+  err = sock->ops->connect(sock, (struct sockaddr_unsized *)&remote, sizeof(remote), 0);
+#else
   err = sock->ops->connect(sock, (struct sockaddr *)&remote, sizeof(remote), 0);
+#endif
+
   if (err < 0)
   {
     dev_err(dev, "Error %d while connecting to %pI4\n", err, &remote.sin_addr);
@@ -558,7 +563,11 @@ static int hb_rf_eth_gpio_get(struct gpio_chip *gc, unsigned int gpio)
   return gpio_value & BIT(gpio);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+static int hb_rf_eth_gpio_set(struct gpio_chip *gc, unsigned int gpio, int value)
+#else
 static void hb_rf_eth_gpio_set(struct gpio_chip *gc, unsigned int gpio, int value)
+#endif
 {
   unsigned long lock_flags;
 
@@ -572,6 +581,10 @@ static void hb_rf_eth_gpio_set(struct gpio_chip *gc, unsigned int gpio, int valu
   hb_rf_eth_send_gpio();
 
   spin_unlock_irqrestore(&gpio_lock, lock_flags);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+  return 0;
+#endif
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
@@ -583,7 +596,11 @@ static int hb_rf_eth_gpio_get_multiple(struct gpio_chip *gc, unsigned long *mask
 }
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+static int hb_rf_eth_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask, unsigned long *bits)
+#else
 static void hb_rf_eth_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask, unsigned long *bits)
+#endif
 {
   unsigned long lock_flags;
 
@@ -595,6 +612,10 @@ static void hb_rf_eth_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mas
   hb_rf_eth_send_gpio();
 
   spin_unlock_irqrestore(&gpio_lock, lock_flags);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+  return 0;
+#endif
 }
 
 static int hb_rf_eth_get_led_gpio_index(struct generic_raw_uart *raw_uart, enum generic_raw_uart_led led)
@@ -841,5 +862,5 @@ module_exit(hb_rf_eth_exit);
 
 MODULE_AUTHOR("Alexander Reinert <alex@areinert.de>");
 MODULE_DESCRIPTION("HB-RF-ETH raw uart driver");
-MODULE_VERSION("1.23");
+MODULE_VERSION("1.24");
 MODULE_LICENSE("GPL");
