@@ -61,7 +61,7 @@
 #define CONNECTION_TYPE_MASTER 0
 #define CONNECTION_TYPE_SLAVE 1
 
-#define BUFSIZE 1024  //just use buffer size power of 2. otherwise the size and index calculation dosn't work
+#define BUFSIZE 1024  //just use buffer size power of 2. otherwise the size and index calculation doesn't work
 
 #define DUMP_READWRITE 0
 
@@ -404,7 +404,7 @@ out:
 	}
 	if( ret > 0 || CIRC_CNT(channel->master2slave_buf.head,channel->master2slave_buf.tail,BUFSIZE) )
 	{
-		//send a signal to reading procces if return is ok or data in the buffer
+		//send a signal to reading process if return is ok or data in the buffer
 		wake_up_interruptible( &channel->master2slaveq );
 	}
 	
