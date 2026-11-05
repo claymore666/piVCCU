@@ -36,6 +36,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/circ_buf.h>
+#include <linux/ratelimit.h>
 #include "generic_raw_uart.h"
 
 #include "stack_protector.include"
@@ -76,6 +77,10 @@ static atomic_t consecutive_send_errors = ATOMIC_INIT(0);
  */
 static bool uart_started = false;
 static DEFINE_MUTEX(uart_started_mutex);
+
+/* both lines repeat about twice a second while the board is unreachable (WP-001) */
+static DEFINE_RATELIMIT_STATE(reconnect_log_rs, 30 * HZ, 1);
+static DEFINE_RATELIMIT_STATE(connect_timeout_log_rs, 30 * HZ, 1);
 
 struct send_msg_queue_entry {
   char buffer[BUFFER_SIZE];
@@ -316,7 +321,8 @@ static int hb_rf_eth_try_connect(char endpointIdentifier)
 
     if (err)
     {
-      dev_err(dev, "Timeout occured while connecting to %pI4\n", &remote.sin_addr);
+      if (__ratelimit(&connect_timeout_log_rs))
+        dev_err(dev, "Timeout occured while connecting to %pI4\n", &remote.sin_addr);
       sock_release(sock);
       return err;
     }
@@ -479,7 +485,8 @@ static int hb_rf_eth_recv_threadproc(void *data)
            * accepted and allocates a fresh one (:100-105).
            */
           identifier = attempt <= HB_RF_ETH_STORED_ID_ATTEMPTS ? currentEndpointIdentifier : 0;
-          dev_info(dev, "Trying to reconnect to %pI4\n", &remote.sin_addr);
+          if (__ratelimit(&reconnect_log_rs))
+            dev_info(dev, "Trying to reconnect to %pI4 (attempt %u)\n", &remote.sin_addr, attempt);
           if (hb_rf_eth_try_connect(identifier) == 0)
           {
             lastReceivedKeepAlive = jiffies;
@@ -822,6 +829,14 @@ static int __init hb_rf_eth_init(void)
   int err;
 
   spin_lock_init(&gpio_lock);
+
+  /*
+   * No "callbacks suppressed" line: it carries no device name and the
+   * reconnect line already shows the attempt number (WP-001). With this
+   * flag the count is only printed by ratelimit_state_exit(), never called.
+   */
+  ratelimit_set_flags(&reconnect_log_rs, RATELIMIT_MSG_ON_RELEASE);
+  ratelimit_set_flags(&connect_timeout_log_rs, RATELIMIT_MSG_ON_RELEASE);
 
   spin_lock_init(&queue_write_lock);
   init_waitqueue_head(&queue_wq);
