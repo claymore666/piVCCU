@@ -294,6 +294,11 @@ static int hb_rf_eth_try_connect(char endpointIdentifier)
             break;
           }
         }
+        else if (len < 0 && len != -EAGAIN && len != -EPROTO)
+        {
+          /* hard error (e.g. ICMP port unreachable): waiting out the window only spins */
+          break;
+        }
       }
       kfree(recv_buffer);
     }
@@ -306,7 +311,9 @@ static int hb_rf_eth_try_connect(char endpointIdentifier)
     }
   }
 
+  mutex_lock(&sock_mutex);
   _sock = sock;
+  mutex_unlock(&sock_mutex);
   sysfs_notify(&dev->kobj, NULL, "is_connected");
   generic_raw_uart_set_connection_state(raw_uart, true);
   return 0;
