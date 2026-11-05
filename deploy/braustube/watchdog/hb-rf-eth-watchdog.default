@@ -1,0 +1,20 @@
+# /etc/default/hb-rf-eth-watchdog
+# Settings of hb-rf-eth-watchdog.sh. Every value is shown with its default;
+# remove the leading # and change it to override. The file is read as shell.
+
+# Seconds is_connected must read 0 before the watchdog acts.
+#DOWN_SECONDS=120
+
+# Minimum seconds between two actions (restart or reboot).
+#COOLDOWN_SECONDS=600
+
+# Restarts of debmatic.service allowed within WINDOW_SECONDS.
+#MAX_RESTARTS=2
+#WINDOW_SECONDS=3600
+
+# Minimum seconds between two identical log lines.
+#LOG_INTERVAL=300
+
+# yes: reboot the machine when MAX_RESTARTS did not bring the driver back.
+# no: only log "would reboot".
+#REBOOT=no

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the HB-RF-ETH watchdog every 30 seconds
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
