@@ -1,7 +1,7 @@
 #!/bin/bash
 PKG_BUILD=89
 
-PKG_VERSION=1.0.$PKG_BUILD
+PKG_VERSION=1.0.$PKG_BUILD+braustube1
 
 function throw {
   echo $1
