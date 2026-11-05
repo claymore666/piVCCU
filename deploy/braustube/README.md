@@ -22,6 +22,21 @@ the current directory) and copy it to the host.
 
 ## Install
 
+First record what the host has now, before anything is installed:
+
+```
+dpkg-query -W -f '${Version}\n' pivccu-modules-dkms
+modinfo -F version hb_rf_eth
+```
+
+Write both lines down, or redirect them into a file of your choice. They
+are the rollback target (see Rollback): the repository does not keep
+every version, and the upstream version the patch is based on is not
+necessarily what the host had. If the first command already prints a
+version with `+braustube` in it, a patched package is installed and you
+have recorded it before; keep that earlier record and do not make a new
+one.
+
 ```
 apt install ./pivccu-modules-dkms-1.0.89+braustube1.deb
 apt-mark hold pivccu-modules-dkms
@@ -123,15 +138,28 @@ edited default file is kept.
 
 ## Rollback
 
+The target is the package version you recorded before the install, not
+a fixed number. See which versions the repository offers:
+
+```
+apt-cache policy pivccu-modules-dkms
+```
+
+Then, with the recorded version in place of `<recorded version>`:
+
 ```
 apt-mark unhold pivccu-modules-dkms
-apt install --allow-downgrades pivccu-modules-dkms=1.0.89
+apt install --allow-downgrades pivccu-modules-dkms=<recorded version>
 systemctl restart debmatic.service
 ```
 
-`--allow-downgrades` is needed because `1.0.89+braustube1` sorts after
-`1.0.89`. Run the Verify commands again: `modinfo -F version
-hb_rf_eth` should now print the upstream version, `1.24`. Switch the
+`--allow-downgrades` is needed because a version older than
+`1.0.89+braustube1`, and `1.0.89` itself, sorts before it. If the
+recorded version is not in the `apt-cache policy` list, the repository
+no longer offers it; pick one of the offered versions, and expect the
+module version to differ from the recorded one. Run the Verify commands
+again: `modinfo -F version hb_rf_eth` should now print the module version
+you recorded, and `dpkg-query` the recorded package version. Switch the
 watchdog off as well if you roll back (`systemctl disable --now
 hb-rf-eth-watchdog.timer`): it is meant for the patched driver.
 
@@ -160,8 +188,10 @@ Resolve conflicts, then:
    is `pivccu-modules-dkms-1.0.90+braustube1.deb` in the current
    directory.
 4. Copy it to the host and repeat Install, with `apt-mark unhold` first
-   and `apt-mark hold` again afterwards. Update the two expected
-   versions in the Automation list.
+   and `apt-mark hold` again afterwards. Do not record the installed
+   version again: it is the patched one, and the rollback target stays
+   the version recorded before the first install. Update the two
+   expected versions in the Automation list.
 
 ## Test plan
 
@@ -244,39 +274,52 @@ Set `BOARD=192.0.2.44` (your board address) in the shell first.
 The steps and assertions above as a flat list, for writing a playbook.
 Variables: `deb_file` is `pivccu-modules-dkms-1.0.89+braustube1.deb`,
 `module_version` is `1.24+braustube1`, `package_version` is
-`1.0.89+braustube1`.
+`1.0.89+braustube1`. `recorded_package_version` and
+`recorded_module_version` are set by step 2 and kept between runs.
 
 1. Copy `deb_file` to the host.
-2. Install it with `apt install ./pivccu-modules-dkms-1.0.89+braustube1.deb`,
+2. Record the pre-patch versions, before any install and only if
+   `dpkg-query -W -f '${Version}' pivccu-modules-dkms` prints a version
+   that does not contain `+braustube`: save that version as
+   `recorded_package_version` and `modinfo -F version hb_rf_eth` as
+   `recorded_module_version`, where they survive the run (a file on the
+   host, or a fact on the controller). Otherwise leave the saved values
+   alone: on a host that has the patched package, recording again would
+   store the patched version as the rollback target. If the package is
+   not installed, nothing is recorded and step 15 cannot run.
+3. Install it with `apt install ./pivccu-modules-dkms-1.0.89+braustube1.deb`,
    only if the installed version is not `1.0.89+braustube1`.
-3. Set the package state of `pivccu-modules-dkms` to `hold`
+4. Set the package state of `pivccu-modules-dkms` to `hold`
    (`apt-mark hold pivccu-modules-dkms`).
-4. Assert `modinfo -F version hb_rf_eth` prints `1.24+braustube1`.
-5. Assert `dpkg-query -W -f '${Version}' pivccu-modules-dkms` prints
+5. Assert `modinfo -F version hb_rf_eth` prints `1.24+braustube1`.
+6. Assert `dpkg-query -W -f '${Version}' pivccu-modules-dkms` prints
    `1.0.89+braustube1`.
-6. Restart `debmatic.service` when step 2 installed something, or when
+7. Restart `debmatic.service` when step 3 installed something, or when
    `/sys/module/hb_rf_eth/version` exists and does not contain
    `1.24+braustube1` (a run interrupted after the install leaves the old
-   module loaded; steps 4 and 5 only read the disk). Do not restart
+   module loaded; steps 5 and 6 only read the disk). Do not restart
    otherwise.
-7. Always assert, after any restart and on every run, that
+8. Always assert, after any restart and on every run, that
    `/sys/module/hb_rf_eth/version` contains `1.24+braustube1` and that
    `/sys/class/hb-rf-eth/hb-rf-eth/is_connected` becomes `1` (retry for
    up to a few minutes).
-8. Copy `watchdog/hb-rf-eth-watchdog.sh` to
+9. Copy `watchdog/hb-rf-eth-watchdog.sh` to
    `/usr/local/sbin/hb-rf-eth-watchdog.sh`, mode 0755, owner root.
-9. Copy `watchdog/hb-rf-eth-watchdog.service` and
-   `watchdog/hb-rf-eth-watchdog.timer` to `/etc/systemd/system/`, mode
-   0644.
-10. Copy `watchdog/hb-rf-eth-watchdog.default` to
+10. Copy `watchdog/hb-rf-eth-watchdog.service` and
+    `watchdog/hb-rf-eth-watchdog.timer` to `/etc/systemd/system/`, mode
+    0644.
+11. Copy `watchdog/hb-rf-eth-watchdog.default` to
     `/etc/default/hb-rf-eth-watchdog`, mode 0644, only if the target does
     not exist (do not overwrite an edited file).
-11. Run `systemctl daemon-reload` if step 9 changed a unit file.
-12. Enable and start `hb-rf-eth-watchdog.timer`.
-13. Assert `systemctl is-active hb-rf-eth-watchdog.timer` prints
+12. Run `systemctl daemon-reload` if step 10 changed a unit file.
+13. Enable and start `hb-rf-eth-watchdog.timer`.
+14. Assert `systemctl is-active hb-rf-eth-watchdog.timer` prints
     `active`.
-14. Rollback, when requested: disable and stop the timer,
+15. Rollback, when requested: disable and stop the timer,
     `apt-mark unhold pivccu-modules-dkms`,
-    `apt install --allow-downgrades pivccu-modules-dkms=1.0.89`, restart
-    `debmatic.service`, assert `modinfo -F version hb_rf_eth` prints
-    `1.24`.
+    `apt install --allow-downgrades pivccu-modules-dkms=<recorded_package_version>`,
+    restart `debmatic.service`, assert `dpkg-query -W -f '${Version}'
+    pivccu-modules-dkms` prints `recorded_package_version` and
+    `modinfo -F version hb_rf_eth` prints `recorded_module_version`. If
+    the repository no longer offers `recorded_package_version` the
+    install fails; report that and stop.
