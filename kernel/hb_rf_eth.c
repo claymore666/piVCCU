@@ -47,6 +47,9 @@
 
 #define BUFFER_SIZE 1500
 
+/* reconnect attempts with the stored endpoint identifier before falling back to 0 (WP-001) */
+#define HB_RF_ETH_STORED_ID_ATTEMPTS 3
+
 static short int autoreconnect = 1;
 
 static struct gpio_chip gc = {0};
@@ -65,6 +68,14 @@ static struct device *dev = NULL;
 
 static char currentEndpointIdentifier = 0;
 static atomic_t consecutive_send_errors = ATOMIC_INIT(0);
+
+/*
+ * True while the raw uart is open (msg 5 sent, msg 6 not yet). Written, and
+ * acted on, only under uart_started_mutex, so msg 5 and msg 6 enter the send
+ * queue in the same order as the flag changes.
+ */
+static bool uart_started = false;
+static DEFINE_MUTEX(uart_started_mutex);
 
 struct send_msg_queue_entry {
   char buffer[BUFFER_SIZE];
@@ -383,6 +394,23 @@ static int hb_rf_eth_send_threadproc(void *data)
   return 0;
 }
 
+static void hb_rf_eth_resume_uart(void)
+{
+  mutex_lock(&uart_started_mutex);
+  /*
+   * A protocol version 1 connect and an identifier 0 reconnect clear
+   * _connectionStarted on the board (fw rawuartudplistener.cpp:89, :104);
+   * a reconnect with the matching identifier leaves it alone (:106-110).
+   * Only msg 5 sets it (:164), and while it is clear the board drops every
+   * received radio frame (:238). A stale flag on the board cannot be told
+   * apart from a fresh one on this side, so msg 5 is re-sent after every
+   * successful reconnect.
+   */
+  if (uart_started)
+    hb_rf_eth_queue_msg(5, NULL, 0);
+  mutex_unlock(&uart_started_mutex);
+}
+
 static int hb_rf_eth_recv_threadproc(void *data)
 {
   char *buffer;
@@ -439,19 +467,32 @@ static int hb_rf_eth_recv_threadproc(void *data)
 
       if (autoreconnect)
       {
-        while (!kthread_should_stop())
+        unsigned int attempt;
+        char identifier;
+
+        for (attempt = 1; !kthread_should_stop(); attempt++)
         {
+          /*
+           * The board ignores a reconnect whose identifier differs from its
+           * own, without a reply, and its identifier restarts when it reboots
+           * (fw rawuartudplistener.cpp:106-110). Identifier 0 is always
+           * accepted and allocates a fresh one (:100-105).
+           */
+          identifier = attempt <= HB_RF_ETH_STORED_ID_ATTEMPTS ? currentEndpointIdentifier : 0;
           dev_info(dev, "Trying to reconnect to %pI4\n", &remote.sin_addr);
-          if (hb_rf_eth_try_connect(currentEndpointIdentifier) == 0)
+          if (hb_rf_eth_try_connect(identifier) == 0)
           {
             lastReceivedKeepAlive = jiffies;
             atomic_set(&consecutive_send_errors, 0);
             dev_info(dev, "Successfully connected to %pI4\n", &remote.sin_addr);
+            if (identifier == 0)
+              dev_warn(dev, "%pI4 did not answer the stored endpoint identifier and accepted a fresh one, the board was probably restarted\n", &remote.sin_addr);
+            hb_rf_eth_resume_uart();
             break;
           }
-	  msleep_interruptible(500);
+          msleep_interruptible(500);
         }
-	continue;
+        continue;
       }
       else
       {
@@ -677,14 +718,20 @@ static int hb_rf_eth_reset_radio_module(struct generic_raw_uart *raw_uart)
 
 static int hb_rf_eth_start_connection(struct generic_raw_uart *raw_uart)
 {
+  mutex_lock(&uart_started_mutex);
+  uart_started = true;
   hb_rf_eth_queue_msg(5, NULL, 0);
+  mutex_unlock(&uart_started_mutex);
   msleep(20);
   return 0;
 }
 
 static void hb_rf_eth_stop_connection(struct generic_raw_uart *raw_uart)
 {
+  mutex_lock(&uart_started_mutex);
+  uart_started = false;
   hb_rf_eth_queue_msg(6, NULL, 0);
+  mutex_unlock(&uart_started_mutex);
   msleep(20);
 }
 
