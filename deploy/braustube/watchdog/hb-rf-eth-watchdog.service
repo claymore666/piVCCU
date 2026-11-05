@@ -1,0 +1,14 @@
+[Unit]
+Description=HB-RF-ETH watchdog: restart debmatic when the driver stays disconnected although the board answers
+After=debmatic.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hb-rf-eth-watchdog.sh
+# The state (down-since mark, action history) must survive between ticks,
+# so the directory is kept after each oneshot run. It is lost at boot.
+RuntimeDirectory=hb-rf-eth-watchdog
+RuntimeDirectoryPreserve=yes
+# A restart of debmatic.service is a blocking oneshot and can take minutes
+# (its own TimeoutSec is 300 s).
+TimeoutStartSec=600
