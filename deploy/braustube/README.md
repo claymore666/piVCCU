@@ -86,11 +86,38 @@ Expect:
 
 ## Watchdog
 
-The watchdog restarts `debmatic.service` when `is_connected` has read 0
-for more than 120 seconds although the board answers ping, which means
-the board is up and the driver is stuck. A board that does not answer is
-left to the driver. At most two restarts per hour, at least 600 seconds
-between actions. It never reboots unless you switch that on.
+The watchdog restarts `debmatic.service` (the CCU stack: multimacd, rfd,
+hmserver) in three cases. All three go through the same restart path:
+at least 600 seconds between actions, at most two restarts per hour, and
+it never reboots unless you switch that on.
+
+1. Driver down. `is_connected` has read 0 for more than 120 seconds
+   although the board answers ping, which means the board is up and the
+   driver is stuck. A board that does not answer is left to the driver.
+2. Trigger A, board restarted. The kernel log shows that the driver
+   reconnected with a fresh endpoint identifier (`... accepted a fresh
+   one, the board was probably restarted`) and `is_connected` reads 1.
+   A board that restarts resets its radio coprocessor; the CCU stack is
+   not told and stays out of sync with it, so every HmIP device turns
+   UNREACH although the link is up again. A restart of the stack fixes
+   that. The watchdog reads the kernel log once per tick; the first tick
+   after boot only marks the position, so a line from boot time is never
+   acted on. A line that arrives inside the cooldown is kept and acted on
+   when the cooldown ends; one that arrives while `is_connected` reads 0
+   is ignored (case 1 covers it). The text it looks for is in one
+   variable, `FRESH_ID_MATCH`, at the top of the script.
+3. Trigger B, HmIP dead with the link up (backstop for anything trigger
+   A cannot see). While `is_connected` reads 1 and `debmatic.service` is
+   active, at most every 300 seconds the watchdog asks ReGa (with
+   `tclsh` and `tclrega.so`, the way debmatic's own scripts do) how many
+   HmIP-RF devices have `UNREACH` set on their `:0` channel. When at
+   least 3 devices and at least 50 percent of all of them are UNREACH
+   for 900 seconds without interruption, it restarts the stack. A ReGa
+   error, a timeout (20 seconds) or an unreadable answer is logged and
+   changes nothing, the dead-since mark stays as it was. After a restart
+   the CCU keeps UNREACH set until a device reports again, so the
+   cooldown is what holds a second restart back in the first minutes,
+   and the 900 seconds start from zero.
 
 Install (the files are in `deploy/braustube/watchdog/` of the
 repository; copy that directory to the host):
@@ -116,15 +143,38 @@ journalctl -u hb-rf-eth-watchdog.service -f
 systemd logs a start and a finish line per run;
 `journalctl -t hb-rf-eth-watchdog.sh` shows only the script's own lines.
 The script prints a line only when something happens: `connected again after N s`,
-`restarting debmatic.service`, `board does not answer, leaving it to the
-driver`, `would reboot`. State is kept in `/run/hb-rf-eth-watchdog/`
-and is lost at boot on purpose.
+`restarting debmatic.service` (the line starts with the reason: `driver
+down for N s`, `trigger A`, `trigger B, N of M HmIP-RF devices UNREACH`),
+`board does not answer, leaving it to the driver`, `would reboot`,
+`HmIP check: ReGa query failed` and `HmIP devices reachable again`. State
+is kept in `/run/hb-rf-eth-watchdog/` and is lost at boot on purpose.
 
 Settings are in `/etc/default/hb-rf-eth-watchdog`; every value is
 there, commented out, with its default. The file is read on every run,
 no restart is needed. `REBOOT=yes` makes the watchdog reboot the machine
 when two restarts within an hour did not bring the driver back; the
 default `REBOOT=no` only logs `would reboot`.
+
+The settings of the two newer triggers: `RESTART_ON_FRESH_ID` (`yes`;
+`no` only logs trigger A), `HMIP_CHECK` (`yes`; `no` never asks ReGa),
+`HMIP_CHECK_INTERVAL` (300 s), `HMIP_DEAD_MIN` (3), `HMIP_DEAD_PERCENT`
+(50), `HMIP_DEAD_SECONDS` (900), `REGA_TIMEOUT` (20 s). An existing host
+needs no change: the installer keeps an edited default file, and every
+default also lives in the script, so a file without the new keys gets the
+new behaviour as soon as the new script is copied. Copy the new keys from
+`hb-rf-eth-watchdog.default` into the file only to change them.
+
+Run the tests (no root, no board, no dependencies beyond bash; the
+script runs against stubs of `systemctl`, `journalctl`, `ping` and the
+ReGa query):
+
+```
+watchdog/test/run-tests.sh
+```
+
+It prints one line per case and exits non-zero when any case fails. It
+does not show that the real `journalctl`, `tclsh` and ReGa behave as the
+stubs assume; test plan step 5 does.
 
 Turn it off for a while, or for good:
 
@@ -269,6 +319,39 @@ Set `BOARD=192.0.2.44` (your board address) in the shell first.
    the watchdog did; on a healthy night it prints nothing but the
    `-- No entries --` marker.
 
+5. Board restart with the watchdog running (trigger A). Needs the
+   watchdog timer active and HmIP devices paired. Power-cycle the board
+   (remove its power for a few seconds), do not touch the host. Expected
+   within about ten minutes:
+
+   ```
+   journalctl -t hb-rf-eth-watchdog.sh --since -15min
+   journalctl -k --since -15min | grep -i hb-rf-eth
+   ```
+
+   The kernel log shows the reconnect attempts, then `accepted a fresh
+   one` and `Successfully connected`. The watchdog log shows, at the next
+   tick (30 seconds at most) after the reconnect, `trigger A, kernel log
+   shows a reconnect with a fresh endpoint identifier ...: restarting
+   debmatic.service (restart 1 of 2 within 3600 s)`. If the board was
+   off longer than the 120 seconds of case 1 and the driver was down
+   meanwhile, the line may instead start with `driver down for`; that is
+   fine, the point is exactly one restart. Afterwards
+   `cat /sys/class/hb-rf-eth/hb-rf-eth/is_connected` reads 1 and the HmIP
+   devices leave UNREACH within ten minutes. No second restart follows
+   inside the 600 seconds cooldown.
+
+   Once, check the trigger B query by hand on the host (it must print one
+   line, `HMIP total=N unreach=M`, with N the number of HmIP-RF devices
+   you have):
+
+   ```
+   systemctl stop hb-rf-eth-watchdog.timer
+   sed -n "/^REGA_TCL='/,/^}\]'/p" /usr/local/sbin/hb-rf-eth-watchdog.sh \
+     | sed "1s/^REGA_TCL='//; \$s/'\$//" | tclsh
+   systemctl start hb-rf-eth-watchdog.timer
+   ```
+
 ## Automation
 
 The steps and assertions above as a flat list, for writing a playbook.
@@ -304,7 +387,10 @@ Variables: `deb_file` is `pivccu-modules-dkms-1.0.89+braustube1.deb`,
    `/sys/class/hb-rf-eth/hb-rf-eth/is_connected` becomes `1` (retry for
    up to a few minutes).
 9. Copy `watchdog/hb-rf-eth-watchdog.sh` to
-   `/usr/local/sbin/hb-rf-eth-watchdog.sh`, mode 0755, owner root.
+   `/usr/local/sbin/hb-rf-eth-watchdog.sh`, mode 0755, owner root. This
+   is also the whole update for hosts that already run the watchdog: the
+   defaults of the newer triggers live in the script (nothing else to
+   copy; `watchdog/test/` stays in the repository).
 10. Copy `watchdog/hb-rf-eth-watchdog.service` and
     `watchdog/hb-rf-eth-watchdog.timer` to `/etc/systemd/system/`, mode
     0644.
