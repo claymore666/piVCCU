@@ -18,3 +18,27 @@
 # yes: reboot the machine when MAX_RESTARTS did not bring the driver back.
 # no: only log "would reboot".
 #REBOOT=no
+
+# Trigger A. yes: restart debmatic.service when the kernel log shows that the
+# driver reconnected with a fresh endpoint identifier (the board restarted and
+# reset its radio coprocessor, which the CCU stack does not notice).
+# no: only log it.
+#RESTART_ON_FRESH_ID=yes
+
+# Trigger B (backstop). yes: while the link is up, ask ReGa how many HmIP-RF
+# devices are UNREACH; no: never ask.
+#HMIP_CHECK=yes
+
+# Seconds between two ReGa queries.
+#HMIP_CHECK_INTERVAL=300
+
+# HmIP is "dead" when at least HMIP_DEAD_MIN devices and at least
+# HMIP_DEAD_PERCENT percent of all HmIP-RF devices are UNREACH.
+#HMIP_DEAD_MIN=3
+#HMIP_DEAD_PERCENT=50
+
+# Seconds HmIP must be dead without interruption before the restart.
+#HMIP_DEAD_SECONDS=900
+
+# Seconds before a ReGa query is abandoned.
+#REGA_TIMEOUT=20
