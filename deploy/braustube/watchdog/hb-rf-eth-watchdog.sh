@@ -5,13 +5,13 @@
 # One tick per run (driven by hb-rf-eth-watchdog.timer). State lives in
 # /run/hb-rf-eth-watchdog and is lost at boot on purpose. A board that does
 # not answer ping is left alone: the driver reconnects a restarted board by
-# itself (fork patch WP-001). Output goes to stdout, i.e. the journal.
+# itself (fork patch of the driver). Output goes to stdout, i.e. the journal.
 #
 # Three triggers, one restart path (act): the driver stays disconnected while
-# the board answers (WP-002); the driver reconnected with a fresh endpoint
+# the board answers; the driver reconnected with a fresh endpoint
 # identifier, i.e. the board rebooted and reset its radio coprocessor, which
-# the host stack never learns of (trigger A, WP-004); the link is up but most
-# HmIP devices stay UNREACH (trigger B, WP-004).
+# the host stack never learns of (trigger A); the link is up but most
+# HmIP devices stay UNREACH (trigger B).
 set -eu
 
 # Defaults; every one can be overridden in /etc/default/hb-rf-eth-watchdog.
@@ -35,8 +35,10 @@ BOARD_FILE=${BOARD_FILE:-/etc/default/hb_rf_eth}
 STATE_DIR=${STATE_DIR:-/run/hb-rf-eth-watchdog}
 UNIT=debmatic.service
 # Test hooks: WATCHDOG_NOW replaces the clock, REGA_CMD replaces the built-in
-# tclsh query (a command whose output is parsed like the real one).
+# tclsh query (a command whose output is parsed like the real one),
+# BOOT_ID_FILE replaces the kernel's boot id.
 REGA_CMD=${REGA_CMD:-}
+BOOT_ID_FILE=${BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}
 # Kernel text that marks a reconnect with a fresh endpoint identifier: the
 # dev_warn at kernel/hb_rf_eth.c:496 ("%pI4 did not answer the stored endpoint
 # identifier and accepted a fresh one, ..."). Change it here if the driver text changes.
@@ -137,8 +139,8 @@ act() {
     # tick may act on again. The module reload that debmatic does on restart
     # connects without that warning (kernel/hb_rf_eth.c:541), so nothing else
     # would mask the stale line. Moving the cursor to the journal end is keyed
-    # on journal position, not on tick order (WP-004 R1).
-    journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat > /dev/null 2>&1 || true
+    # on journal position, not on tick order.
+    anchor_kernel_cursor || true
     return 0
   fi
 
@@ -157,14 +159,46 @@ act() {
 # New kernel messages since the previous tick, read on every tick before any
 # early exit so that no line is ever replayed later. A missing cursor file means
 # first tick since boot: journalctl would print the whole boot, so the output
-# is dropped and only the cursor is kept.
+# is dropped and only the cursor is kept (anchor_kernel_cursor).
+# journalctl does not fail on every bad cursor. Measured with systemd 257: an
+# empty file and a cursor of another boot make it print the whole current boot
+# (exit 0), which would replay old fresh-identifier lines; a garbled or
+# truncated cursor, or one from a vacuumed journal, makes it exit 1 and leave
+# the file as it is, so every later tick would fail the same way. Both are
+# handled alike: a cursor that is not of the current boot's format is not
+# passed to journalctl, a failed read counts as unusable too, and the file is
+# deleted and re-anchored at the journal end at once, without acting on
+# anything. Lines logged between the unusable cursor and the re-anchor are
+# lost; trigger B covers that.
+anchor_kernel_cursor() {
+  journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat > /dev/null 2>&1
+}
+
+# cursor_usable: the cursor file holds one journal cursor of the current boot
+# ("s=...;i=...;b=<boot id>;m=...", b= is the boot id without dashes).
+cursor_usable() {
+  local c b id
+  { read -r c < "$STATE_DIR/kernel.cursor"; } 2> /dev/null || return 1
+  case $c in
+    s=*';i='*';b='*';m='*) ;;
+    *) return 1 ;;
+  esac
+  b=${c#*';b='}
+  b=${b%%';'*}
+  if { read -r id < "$BOOT_ID_FILE"; } 2> /dev/null; then
+    [ "$b" = "${id//-/}" ] || return 1
+  fi
+}
+
 kmsg=
 if [ -e "$STATE_DIR/kernel.cursor" ]; then
-  if ! kmsg=$(journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat 2> /dev/null); then
+  if ! cursor_usable || ! kmsg=$(journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat 2> /dev/null); then
     kmsg=
-    log_every journalctl "$LOG_INTERVAL" "journalctl -k failed, trigger A blind this tick"
+    rm -f "$STATE_DIR/kernel.cursor" || true
+    anchor_kernel_cursor || true
+    log_every journalctl "$LOG_INTERVAL" "journalctl -k failed or the kernel cursor is unusable, trigger A blind this tick"
   fi
-elif ! journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat > /dev/null 2>&1; then
+elif ! anchor_kernel_cursor; then
   log_every journalctl "$LOG_INTERVAL" "journalctl -k failed, trigger A blind this tick"
 fi
 fresh_seen=no
@@ -199,7 +233,7 @@ trigger_fresh() {
 }
 
 # rega_script returns a Tcl list (STDOUT, then every script variable), not
-# plain text; measured on a live CCU (WP-004), hence the array and $r(STDOUT).
+# plain text; measured on a live CCU, hence the array and $r(STDOUT).
 # The ReGa query: one line "HMIP total=N unreach=M" over the HmIP-RF devices'
 # maintenance channel (:0) UNREACH datapoint. Built-in version below; REGA_CMD
 # replaces it for tests.
@@ -337,7 +371,7 @@ if [ "$value" != 0 ]; then
 fi
 
 # Trigger A needs a live link: while it is down the checks below own the case.
-# A pending trigger A mark is dropped; a new line or the down path takes over (WP-004 R2).
+# A pending trigger A mark is dropped; a new line or the down path takes over.
 clear_hmip_mark
 rm -f "$STATE_DIR/fresh_pending"
 if [ "$fresh_seen" = yes ]; then

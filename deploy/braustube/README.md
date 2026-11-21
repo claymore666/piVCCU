@@ -102,7 +102,10 @@ it never reboots unless you switch that on.
    UNREACH although the link is up again. A restart of the stack fixes
    that. The watchdog reads the kernel log once per tick; the first tick
    after boot only marks the position, so a line from boot time is never
-   acted on. A line that arrives inside the cooldown is kept and acted on
+   acted on; a saved position that is empty, of another boot or that
+   journalctl cannot read is discarded the same way (the tick logs `kernel
+   cursor is unusable` or `journalctl -k failed`, lines logged in between
+   are lost and trigger B covers them). A line that arrives inside the cooldown is kept and acted on
    when the cooldown ends; one that arrives while `is_connected` reads 0
    is ignored (case 1 covers it). The text it looks for is in one
    variable, `FRESH_ID_MATCH`, at the top of the script.
@@ -146,7 +149,7 @@ The script prints a line only when something happens: `connected again after N s
 `restarting debmatic.service` (the line starts with the reason: `driver
 down for N s`, `trigger A`, `trigger B, N of M HmIP-RF devices UNREACH`),
 `board does not answer, leaving it to the driver`, `would reboot`,
-`HmIP check: ReGa query failed` and `HmIP devices reachable again`. State
+`HmIP check: ReGa query failed`, `HmIP devices reachable again` and `journalctl -k failed`. State
 is kept in `/run/hb-rf-eth-watchdog/` and is lost at boot on purpose.
 
 Settings are in `/etc/default/hb-rf-eth-watchdog`; every value is
