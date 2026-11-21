@@ -1,5 +1,5 @@
 [Unit]
-Description=HB-RF-ETH watchdog: restart debmatic when the driver stays disconnected although the board answers
+Description=HB-RF-ETH watchdog: restart debmatic when the driver stays disconnected, the board restarted, or HmIP is dead with the link up
 After=debmatic.service
 
 [Service]
