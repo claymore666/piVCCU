@@ -347,7 +347,7 @@ Set `BOARD=192.0.2.44` (your board address) in the shell first.
 
    ```
    systemctl stop hb-rf-eth-watchdog.timer
-   sed -n "/^REGA_TCL='/,/^}\]'/p" /usr/local/sbin/hb-rf-eth-watchdog.sh \
+   sed -n "/^REGA_TCL='/,/^puts \$r(STDOUT)'/p" /usr/local/sbin/hb-rf-eth-watchdog.sh \
      | sed "1s/^REGA_TCL='//; \$s/'\$//" | tclsh
    systemctl start hb-rf-eth-watchdog.timer
    ```

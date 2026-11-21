@@ -38,6 +38,8 @@ esac
 STUB
   cat > "$T/bin/ping" <<'STUB'
 #!/bin/bash
+# ping_logs: the driver logs a fresh-identifier line while ping runs.
+[ ! -e "$FX/ping_logs" ] || echo "$(cat "$FX/ping_logs")" >> "$FX/klog"
 [ ! -e "$FX/noping" ]
 STUB
   cat > "$T/bin/journalctl" <<'STUB'
@@ -58,6 +60,13 @@ echo x >> "$FX/rega_calls"
 [ ! -e "$FX/rega_fail" ] || exit 1
 cat "$FX/rega_out"
 STUB
+  # tclsh stub for the built-in query: runs the real tclsh with a prelude that
+  # fakes the CCU's load of tclrega.so and rega_script, which returns what the
+  # real one returns: a Tcl list of STDOUT followed by the script's variables.
+  cat > "$T/bin/tclsh" <<'STUB'
+#!/bin/bash
+{ cat "$FX/tcl_prelude"; cat; } | PATH=${PATH#"$FX/bin:"} tclsh
+STUB
   chmod +x "$T/bin/"* "$T/rega"
   echo 'HMIP total=10 unreach=0' > "$T/rega_out"
 }
@@ -66,7 +75,7 @@ STUB
 tick() {
   FX=$T WATCHDOG_NOW=$1 PATH="$T/bin:$PATH" \
     SYSFS_FILE=$T/sysfs BOARD_FILE=$T/board CONFIG_FILE=$T/config STATE_DIR=$T/state \
-    REGA_CMD="$T/rega" bash "$script" >> "$T/out" 2>&1
+    REGA_CMD=$([ -e "$T/use_tcl" ] || echo "$T/rega") bash "$script" >> "$T/out" 2>&1
   last_rc=$?
 }
 
@@ -225,6 +234,32 @@ case_a_limit_no_reboot() {
   want_restarts 2 "limit-blocked line is dropped, not retried once the window slides"
 }
 
+case_a_pending_dropped_when_down() {
+  tick 1000
+  klog_add "$FRESH_LINE"; tick 1030
+  want_restarts 1 "first line"
+  klog_add "$FRESH_LINE"; tick 1100
+  echo 0 > "$T/sysfs"; tick 1130
+  echo 1 > "$T/sysfs"; tick 1160
+  tick 1700; tick 2400
+  want_restarts 1 "pending line dropped when is_connected read 0"
+}
+
+case_a_line_during_down_path_restart() {
+  # One board reboot, one restart: the tick read is_connected=0 and the kernel
+  # log (empty), the driver reconnects while the down path pings, the restart
+  # covers that line, no later tick may act on it.
+  echo 0 > "$T/sysfs"
+  tick 1000
+  echo "$FRESH_LINE" > "$T/ping_logs"
+  tick 1121
+  want_restarts 1 "down path restart"
+  rm "$T/ping_logs"
+  echo 1 > "$T/sysfs"
+  for t in 1151 1181 1500 1760 1800 2400; do tick "$t"; done
+  want_restarts 1 "line logged before the restart completed"
+}
+
 case_a_journalctl_failure() {
   touch "$T/journalctl_fail"
   tick 1000
@@ -319,6 +354,26 @@ case_b_rega_error_keeps_mark() {
   rm "$T/rega_fail"
   tick 1900
   want_restarts 1 "mark from 1000 survived the errors"
+}
+
+# The built-in query (REGA_CMD unset) against a tclsh whose rega_script returns
+# the raw list the CCU returns; measured live: STDOUT {HMIP total=24 unreach=1
+# } sessionId {} total 24 unreach 1 ...
+case_b_builtin_query_list_format() {
+  command -v tclsh > /dev/null || { echo "  skipped: no tclsh on this host"; return 0; }
+  touch "$T/use_tcl"
+  cat > "$T/tcl_prelude" <<'TCL'
+proc load {args} {}
+proc rega_script {script} {
+  return [list STDOUT "HMIP total=6 unreach=4\n" sessionId {} httpUserAgent {} total 6 unreach 4 sDevId 1678 oDev {RPI-RF-MOD Serverraum} oIface HmIP-RF oDp null]
+}
+TCL
+  tick 1000; tick 1300; tick 1600
+  want_no_out "ReGa query failed"
+  want_restarts 0 "before HMIP_DEAD_SECONDS"
+  tick 1900
+  want_restarts 1 "dead 900 s read through the built-in query"
+  want_out "trigger B, 4 of 6 HmIP-RF devices UNREACH"
 }
 
 case_b_garbage_output() {

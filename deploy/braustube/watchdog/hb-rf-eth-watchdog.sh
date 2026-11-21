@@ -131,6 +131,14 @@ act() {
       log "systemctl restart $UNIT failed"
       exit 1
     fi
+    # The restart re-initialises the stack, so it covers every fresh-identifier
+    # line logged before it completed, including one that arrived during this
+    # tick (after the kernel log was read, e.g. while ping ran) that no later
+    # tick may act on again. The module reload that debmatic does on restart
+    # connects without that warning (kernel/hb_rf_eth.c:541), so nothing else
+    # would mask the stale line. Moving the cursor to the journal end is keyed
+    # on journal position, not on tick order (WP-004 R1).
+    journalctl -k --cursor-file="$STATE_DIR/kernel.cursor" -q -o cat > /dev/null 2>&1 || true
     return 0
   fi
 
@@ -190,11 +198,13 @@ trigger_fresh() {
   return 1
 }
 
+# rega_script returns a Tcl list (STDOUT, then every script variable), not
+# plain text; measured on a live CCU (WP-004), hence the array and $r(STDOUT).
 # The ReGa query: one line "HMIP total=N unreach=M" over the HmIP-RF devices'
 # maintenance channel (:0) UNREACH datapoint. Built-in version below; REGA_CMD
 # replaces it for tests.
 REGA_TCL='load tclrega.so
-puts [rega_script {
+array set r [rega_script {
   integer total = 0;
   integer unreach = 0;
   string sDevId;
@@ -218,7 +228,8 @@ puts [rega_script {
     }
   }
   WriteLine("HMIP total=" # total # " unreach=" # unreach);
-}]'
+}]
+puts $r(STDOUT)'
 
 # rega_counts: sets $total and $unreach, or returns 1 (error, timeout, unparsable).
 rega_counts() {
@@ -326,7 +337,9 @@ if [ "$value" != 0 ]; then
 fi
 
 # Trigger A needs a live link: while it is down the checks below own the case.
+# A pending trigger A mark is dropped; a new line or the down path takes over (WP-004 R2).
 clear_hmip_mark
+rm -f "$STATE_DIR/fresh_pending"
 if [ "$fresh_seen" = yes ]; then
   log "kernel log: reconnect with a fresh endpoint identifier seen while is_connected=0, ignored"
 fi
