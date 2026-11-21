@@ -26,6 +26,7 @@ new_fixture() {
   : > "$T/out"
   : > "$T/config"
   echo 1 > "$T/sysfs"
+  echo 11111111-2222-3333-4444-555555555555 > "$T/boot_id"
   echo active > "$T/unit"
   echo 'HB_RF_ETH_ADDRESS=192.0.2.44' > "$T/board"
   cat > "$T/bin/systemctl" <<'STUB'
@@ -49,9 +50,23 @@ for a in "$@"; do
 done
 [ ! -e "$FX/journalctl_fail" ] || exit 1
 pos=0
-[ -f "$cf" ] && read -r pos < "$cf"
+c=
+[ -f "$cf" ] && read -r c < "$cf"
+# Measured with systemd 257: an empty cursor file and a cursor of another boot
+# print the whole current boot (exit 0); a cursor journalctl cannot seek to
+# (garbled file) gives "Failed to seek to cursor", exit 1, file unchanged.
+if [ -n "$c" ]; then
+  case $c in
+    s=*';i='*';b='*';m='*)
+      i=${c#*';i='}; i=${i%%;*}
+      b=${c#*';b='}; b=${b%%;*}
+      case $i in '' | *[!0-9]*) exit 1 ;; esac
+      [ "$b" != "$(tr -d - < "$FX/boot_id")" ] || pos=$i ;;
+    *) exit 1 ;;
+  esac
+fi
 tail -n +$((pos + 1)) "$FX/klog"
-wc -l < "$FX/klog" > "$cf"
+printf 's=stub;i=%s;b=%s;m=0;t=0;x=0\n' "$(wc -l < "$FX/klog")" "$(tr -d - < "$FX/boot_id")" > "$cf"
 STUB
   cat > "$T/rega" <<'STUB'
 #!/bin/bash
@@ -74,7 +89,7 @@ STUB
 # tick TIME: one run of the script at the fake time TIME.
 tick() {
   FX=$T WATCHDOG_NOW=$1 PATH="$T/bin:$PATH" \
-    SYSFS_FILE=$T/sysfs BOARD_FILE=$T/board CONFIG_FILE=$T/config STATE_DIR=$T/state \
+    BOOT_ID_FILE=$T/boot_id SYSFS_FILE=$T/sysfs BOARD_FILE=$T/board CONFIG_FILE=$T/config STATE_DIR=$T/state \
     REGA_CMD=$([ -e "$T/use_tcl" ] || echo "$T/rega") bash "$script" >> "$T/out" 2>&1
   last_rc=$?
 }
@@ -94,7 +109,7 @@ want_restarts() { local n; n=$(restarts); [ "$n" = "$1" ] || fail "$2: expected 
 want_out() { out_has "$1" || fail "expected output containing '$1', got: $(tr '\n' '|' < "$T/out")"; }
 want_no_out() { ! out_has "$1" || fail "unexpected output '$1': $(tr '\n' '|' < "$T/out")"; }
 
-# ---- WP-002 behaviour --------------------------------------------------------
+# ---- down path --------------------------------------------------------
 
 case_down_path() {
   echo 0 > "$T/sysfs"
@@ -265,6 +280,105 @@ case_a_journalctl_failure() {
   tick 1000
   want_out "journalctl -k failed"
   [ "$last_rc" = 0 ] || fail "tick must not fail, rc=$last_rc"
+}
+
+case_a_garbage_cursor_recovers() {
+  # A cursor journalctl cannot seek to must not blind trigger A for good: the
+  # failing tick logs and re-anchors at the journal end, the next fresh line
+  # restarts once, a line from before the failure never does.
+  klog_add "$FRESH_LINE"
+  tick 1000
+  echo 'garbage' > "$T/state/kernel.cursor"
+  klog_add "boot noise before the failure"
+  tick 1030
+  [ "$last_rc" = 0 ] || fail "tick must not fail, rc=$last_rc"
+  want_out "journalctl -k failed"
+  want_restarts 0 "line from before the failure"
+  tick 1060
+  want_restarts 0 "tick after the failure, no new line"
+  want_no_out "restarting"
+  klog_add "$FRESH_LINE"
+  tick 1090
+  want_restarts 1 "fresh line after recovery"
+  tick 1120; tick 1800
+  want_restarts 1 "that line must act once"
+}
+
+case_a_garbage_cursor_old_line_not_replayed() {
+  # The fresh line is already in the journal when the cursor turns out unreadable.
+  echo 'garbage' > "$T/state/kernel.cursor"
+  klog_add "$FRESH_LINE"
+  tick 1000
+  want_restarts 0 "line present before the failure"
+  tick 1030; tick 1700
+  want_restarts 0 "line present before the failure, later ticks"
+}
+
+case_a_empty_cursor_not_replayed() {
+  # An empty cursor file makes journalctl print the whole boot, exit 0.
+  tick 1000
+  : > "$T/state/kernel.cursor"
+  klog_add "$FRESH_LINE"
+  tick 1030
+  want_restarts 0 "line present before the empty cursor was found"
+  tick 1060; tick 1700
+  want_restarts 0 "later ticks"
+  want_out "kernel cursor is unusable"
+  klog_add "$FRESH_LINE"
+  tick 1730
+  want_restarts 1 "fresh line after recovery"
+}
+
+case_a_foreign_boot_cursor_not_replayed() {
+  # A cursor of another boot makes journalctl print the whole current boot, exit 0.
+  tick 1000
+  printf 's=stub;i=0;b=deadbeefdeadbeefdeadbeefdeadbeef;m=0;t=0;x=0\n' > "$T/state/kernel.cursor"
+  klog_add "$FRESH_LINE"
+  tick 1030
+  want_restarts 0 "line present before the foreign cursor was found"
+  tick 1060; tick 1700
+  want_restarts 0 "later ticks"
+  want_out "kernel cursor is unusable"
+  klog_add "$FRESH_LINE"
+  tick 1730
+  want_restarts 1 "fresh line after recovery"
+}
+
+case_a_unseekable_cursor_recovers() {
+  # A well-formed cursor of the current boot that journalctl cannot seek to
+  # (e.g. its entry was vacuumed): exit 1, file unchanged. The stub fails on a
+  # non-numeric position.
+  tick 1000
+  printf 's=stub;i=zz;b=11111111222233334444555555555555;m=0;t=0;x=0\n' > "$T/state/kernel.cursor"
+  klog_add "$FRESH_LINE"
+  tick 1030
+  want_out "journalctl -k failed"
+  want_restarts 0 "line present before the failure"
+  tick 1060
+  want_restarts 0 "later tick"
+  klog_add "$FRESH_LINE"
+  tick 1090
+  want_restarts 1 "fresh line after recovery"
+}
+
+case_a_journalctl_failure_logged_once() {
+  # journalctl broken for good (also at the re-anchor): one log line per LOG_INTERVAL.
+  touch "$T/journalctl_fail"
+  echo 'garbage' > "$T/state/kernel.cursor"
+  for t in 1000 1030 1060 1290; do tick "$t"; done
+  [ "$(grep -c 'journalctl -k failed' "$T/out")" = 1 ] || fail "expected one failure line: $(tr '\n' '|' < "$T/out")"
+  tick 1300
+  [ "$(grep -c 'journalctl -k failed' "$T/out")" = 2 ] || fail "expected a second line after LOG_INTERVAL: $(tr '\n' '|' < "$T/out")"
+  rm "$T/journalctl_fail"
+  tick 1330
+  klog_add "$FRESH_LINE"
+  tick 1360
+  want_restarts 1 "recovered after journalctl works again"
+}
+
+case_no_internal_tags() {
+  # Shipped files state reasons, not package numbers.
+  ! grep -rnE 'WP-[0-9]' "$here/.." || fail "package tag in a shipped file"
 }
 
 # ---- trigger B ---------------------------------------------------------------
